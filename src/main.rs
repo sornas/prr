@@ -53,12 +53,14 @@ struct Args {
 #[derive(Debug, Deserialize)]
 struct PrrConfig {
     /// API token for the given service
+    // TODO per service
     token: String,
     /// Directory to place review files
     workdir: Option<String>,
     /// Instance URL
     ///
     /// Useful for hosted instances with custom URLs
+    // TODO per service
     url: Option<String>,
 }
 
@@ -67,6 +69,23 @@ pub struct Config {
     prr: PrrConfig,
 }
 
+impl Config {
+    fn workdir(&self) -> Result<PathBuf> {
+        match &self.prr.workdir {
+            Some(d) => {
+                if d.starts_with('~') {
+                    bail!("Workdir may not use '~' to denote home directory");
+                }
+
+                Ok(PathBuf::from(d))
+            }
+            None => {
+                let xdg_dirs = xdg::BaseDirectories::with_prefix("prr")?;
+                Ok(xdg_dirs.get_data_home())
+            }
+        }
+    }
+}
 
 /// Parses a PR string and returns a tuple (Host::Github, "danobi", "prr", 24) or an error if
 /// string is malformed
@@ -107,8 +126,7 @@ fn parse_pr_str<'a>(s: &'a str) -> Result<(Host, String, String, u64)> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
 
     // Figure out where config file is
@@ -127,13 +145,13 @@ async fn main() -> Result<()> {
         Command::Get { pr, force } => {
             let (host, owner, repo, pr_num) = parse_pr_str(&pr)?;
             let api = host.init(config)?;
-            let review = api.get_pr(&owner, &repo, pr_num, force).await?;
+            let review = api.get_pr(&owner, &repo, pr_num, force)?;
             println!("{}", review.path().display());
         }
         Command::Submit { pr, debug } => {
             let (host, owner, repo, pr_num) = parse_pr_str(&pr)?;
             let api = host.init(config)?;
-            api.submit_pr(&owner, &repo, pr_num, debug).await?;
+            api.submit_pr(&owner, &repo, pr_num, debug)?;
         }
     }
 

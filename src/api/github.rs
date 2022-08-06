@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use lazy_static::lazy_static;
 use regex::Regex;
 
@@ -47,123 +46,110 @@ impl Github {
             crab: octocrab,
         })
     }
-
-    fn workdir(&self) -> Result<PathBuf> {
-        match &self.config.prr.workdir {
-            Some(d) => {
-                if d.starts_with('~') {
-                    bail!("Workdir may not use '~' to denote home directory");
-                }
-
-                Ok(Path::new(d).to_path_buf())
-            }
-            None => {
-                let xdg_dirs = xdg::BaseDirectories::with_prefix("prr")?;
-                Ok(xdg_dirs.get_data_home())
-            }
-        }
-    }
 }
 
-#[async_trait]
 impl Api for Github {
-    async fn get_pr(
+    fn get_pr(
         &self,
         owner: &str,
         repo: &str,
         pr_num: u64,
         force: bool,
     ) -> Result<Review> {
-        let diff = self
-            .crab
-            .pulls(owner, repo)
-            .get_diff(pr_num)
-            .await
-            .context("Failed to fetch diff")?;
+        tokio::runtime::Runtime::new()?.block_on(async {
+            let diff = self
+                .crab
+                .pulls(owner, repo)
+                .get_diff(pr_num)
+                .await
+                .context("Failed to fetch diff")?;
 
-        Review::new(&self.workdir()?, diff, owner, repo, pr_num, force)
+            Review::new(&self.config.workdir()?, diff, owner, repo, pr_num, force)
+        })
     }
 
-    async fn submit_pr(&self, owner: &str, repo: &str, pr_num: u64, debug: bool) -> Result<()> {
-        let review = Review::new_existing(&self.workdir()?, owner, repo, pr_num);
-        let (review_action, review_comment, inline_comments) = review.comments()?;
+    fn submit_pr(&self, owner: &str, repo: &str, pr_num: u64, debug: bool) -> Result<()> {
+        tokio::runtime::Runtime::new()?.block_on(async {
+            let review = Review::new_existing(&self.config.workdir()?, owner, repo, pr_num);
+            let (review_action, review_comment, inline_comments) = review.comments()?;
 
-        if review_comment.is_empty() && inline_comments.is_empty() {
-            bail!("No review comments");
-        }
+            if review_comment.is_empty() && inline_comments.is_empty() {
+                bail!("No review comments");
+            }
 
-        let body = json!({
-            "body": review_comment,
-            "event": match review_action {
-                ReviewAction::Approve => "APPROVE",
-                ReviewAction::RequestChanges => "REQUEST_CHANGES",
-                ReviewAction::Comment => "COMMENT"
-            },
-            "comments": inline_comments
-                .iter()
-                .map(|c| {
-                    let (line, side) = match c.line {
-                        LineLocation::Left(line) => (line, "LEFT"),
-                        LineLocation::Right(line) => (line, "RIGHT"),
-                    };
-
-                    let mut json_comment = json!({
-                        "path": c.file,
-                        "line": line,
-                        "body": c.comment,
-                        "side": side,
-                    });
-                    if let Some(start_line) = &c.start_line {
-                        let (line, side) = match start_line {
+            let body = json!({
+                "body": review_comment,
+                "event": match review_action {
+                    ReviewAction::Approve => "APPROVE",
+                    ReviewAction::RequestChanges => "REQUEST_CHANGES",
+                    ReviewAction::Comment => "COMMENT"
+                },
+                "comments": inline_comments
+                    .iter()
+                    .map(|c| {
+                        let (line, side) = match c.line {
                             LineLocation::Left(line) => (line, "LEFT"),
                             LineLocation::Right(line) => (line, "RIGHT"),
                         };
 
-                        json_comment["start_line"] = (*line).into();
-                        json_comment["start_side"] = side.into();
+                        let mut json_comment = json!({
+                            "path": c.file,
+                            "line": line,
+                            "body": c.comment,
+                            "side": side,
+                        });
+                        if let Some(start_line) = &c.start_line {
+                            let (line, side) = match start_line {
+                                LineLocation::Left(line) => (line, "LEFT"),
+                                LineLocation::Right(line) => (line, "RIGHT"),
+                            };
+
+                            json_comment["start_line"] = (*line).into();
+                            json_comment["start_side"] = side.into();
+                        }
+
+                        json_comment
+                    })
+                    .collect::<Vec<Value>>(),
+            });
+
+            if debug {
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            }
+
+            let path = format!("/repos/{}/{}/pulls/{}/reviews", owner, repo, pr_num);
+            match self
+                .crab
+                ._post(self.crab.absolute_url(path)?, Some(&body))
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status != StatusCode::OK {
+                        let text = resp
+                            .text()
+                            .await
+                            .context("Failed to decode failed response")?;
+                        bail!("Error during POST: Status code: {}, Body: {}", status, text);
                     }
 
-                    json_comment
-                })
-                .collect::<Vec<Value>>(),
-        });
+                    review
+                        .mark_submitted()
+                        .context("Failed to update review metadata")?;
 
-        if debug {
-            println!("{}", serde_json::to_string_pretty(&body)?);
-        }
-
-        let path = format!("/repos/{}/{}/pulls/{}/reviews", owner, repo, pr_num);
-        match self
-            .crab
-            ._post(self.crab.absolute_url(path)?, Some(&body))
-            .await
-        {
-            Ok(resp) => {
-                let status = resp.status();
-                if status != StatusCode::OK {
-                    let text = resp
-                        .text()
-                        .await
-                        .context("Failed to decode failed response")?;
-                    bail!("Error during POST: Status code: {}, Body: {}", status, text);
+                    Ok(())
                 }
-
-                review
-                    .mark_submitted()
-                    .context("Failed to update review metadata")?;
-
-                Ok(())
+                // GH is known to send unescaped control characters in JSON responses which
+                // serde will fail to parse (not that it should succeed)
+                Err(octocrab::Error::Json {
+                    source: _,
+                    backtrace: _,
+                }) => {
+                    eprintln!("Warning: GH response had invalid JSON");
+                    Ok(())
+                }
+                Err(e) => bail!("Error during POST: {}", e),
             }
-            // GH is known to send unescaped control characters in JSON responses which
-            // serde will fail to parse (not that it should succeed)
-            Err(octocrab::Error::Json {
-                source: _,
-                backtrace: _,
-            }) => {
-                eprintln!("Warning: GH response had invalid JSON");
-                Ok(())
-            }
-            Err(e) => bail!("Error during POST: {}", e),
-        }
+        })
     }
 }
