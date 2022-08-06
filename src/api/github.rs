@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::Config;
 use crate::api::Api;
 use crate::parser::{LineLocation, ReviewAction};
-use crate::review::Review;
+use crate::review::{Extra, Review};
 
 // Use lazy static to ensure regex is only compiled once
 lazy_static! {
@@ -64,7 +64,7 @@ impl Api for Github {
                 .await
                 .context("Failed to fetch diff")?;
 
-            Review::new(&self.config.workdir()?, diff, owner, repo, pr_num, force)
+            Review::new(&self.config.workdir()?, diff, owner, repo, pr_num, Extra::default(), force)
         })
     }
 
@@ -89,11 +89,11 @@ impl Api for Github {
                     .map(|c| {
                         let (line, side) = match c.line {
                             LineLocation::Left(line) => (line, "LEFT"),
-                            LineLocation::Right(line) => (line, "RIGHT"),
+                            LineLocation::Right(line) | LineLocation::Both(_, line) => (line, "RIGHT"),
                         };
 
                         let mut json_comment = json!({
-                            "path": c.file,
+                            "path": c.new_file,
                             "line": line,
                             "body": c.comment,
                             "side": side,
@@ -101,7 +101,7 @@ impl Api for Github {
                         if let Some(start_line) = &c.start_line {
                             let (line, side) = match start_line {
                                 LineLocation::Left(line) => (line, "LEFT"),
-                                LineLocation::Right(line) => (line, "RIGHT"),
+                                LineLocation::Right(line) | LineLocation::Both(_, line) => (line, "RIGHT"),
                             };
 
                             json_comment["start_line"] = (*line).into();

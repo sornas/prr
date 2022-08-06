@@ -24,11 +24,46 @@ pub struct Review {
 
 /// Metadata for a single review. Stored as dotfile next to user-facing review file
 #[derive(Serialize, Deserialize, Debug)]
-struct ReviewMetadata {
+pub struct ReviewMetadata {
     /// Original .diff file contents. Used to detect corrupted review files
     original: String,
     /// Time (seconds since epoch) the review file was last submitted
     submitted: Option<u64>,
+
+    /* Required by GitLab */
+
+    /// The HEAD commit of the source branch
+    pub head_sha: Option<String>,
+    /// The merge-base commit SHA between the source branch and the target branches
+    pub base_sha: Option<String>,
+    /// The HEAD commit SHA of the target branch when this version of the diff was created
+    pub start_sha: Option<String>,
+}
+
+#[derive(Default)]
+pub struct Extra {
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    start_sha: Option<String>,
+}
+
+macro_rules! impl_builder {
+    ($( $field:ident: $ty:ty ),* $(,)?) => {
+        $(
+            pub fn $field(&mut self, val: impl Into<Option<$ty>>) -> &mut Self {
+                self.$field = val.into();
+                self
+            }
+        )*
+    };
+}
+
+impl Extra {
+    impl_builder!(
+        base_sha: String,
+        head_sha: String,
+        start_sha: String,
+    );
 }
 
 fn prefix_lines(s: &str, prefix: &str) -> String {
@@ -49,6 +84,7 @@ impl Review {
         owner: &str,
         repo: &str,
         pr_num: u64,
+        extra: Extra,
         force: bool,
     ) -> Result<Review> {
         let review = Review {
@@ -94,6 +130,9 @@ impl Review {
         let metadata = ReviewMetadata {
             original: diff,
             submitted: None,
+            head_sha: extra.head_sha,
+            base_sha: extra.base_sha,
+            start_sha: extra.start_sha,
         };
         let json = serde_json::to_string(&metadata)?;
         let metadata_path = review.metadata_path();
@@ -190,6 +229,12 @@ impl Review {
         Ok(())
     }
 
+    pub fn read_metadata(&self) -> Result<ReviewMetadata> {
+        let metadata_path = self.metadata_path();
+        let data = fs::read_to_string(metadata_path).context("Failed to read metadata file")?;
+        serde_json::from_str(&data).context("Failed to parse metadata json")
+    }
+
     /// Validates whether the user corrupted the quoted contents
     fn validate_review_file(&self, contents: &str) -> Result<()> {
         let mut reconstructed = String::with_capacity(contents.len());
@@ -200,10 +245,7 @@ impl Review {
             }
         }
 
-        let metadata_path = self.metadata_path();
-        let data = fs::read_to_string(metadata_path).context("Failed to read metadata file")?;
-        let metadata: ReviewMetadata =
-            serde_json::from_str(&data).context("Failed to parse metadata json")?;
+        let metadata = self.read_metadata()?;
 
         if reconstructed != metadata.original {
             // Be helpful and provide exact line number of mismatch.

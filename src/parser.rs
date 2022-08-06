@@ -13,7 +13,7 @@ lazy_static! {
     //
     //      `diff --git a/ch1.txt b/ch1.txt`
     //
-    static ref DIFF_START: Regex = Regex::new(r"^diff --git a/.+ b/(?P<new>.+)$").unwrap();
+    static ref DIFF_START: Regex = Regex::new(r"^diff --git a/(?P<old>.+) b/(?P<new>.+)$").unwrap();
 }
 
 /// The location of a line
@@ -26,17 +26,21 @@ lazy_static! {
 pub enum LineLocation {
     /// The "red"/deleted side of the diff
     Left(u64),
-    /// The "green"/added or "white"/existing side of the diff
+    /// The "green"/added side of the diff
     Right(u64),
+    /// The "white"/existing side of the diff as `(line_in_old, line_in_new)`.
+    ///
+    /// Gitlab requires both for comments on unchanged lnes.
+    Both(u64, u64),
 }
 
 /// Represents a single inline comment on a review
 #[derive(Debug, PartialEq)]
 pub struct InlineComment {
-    /// File the comment is in
-    ///
-    /// Note that this is the new filename if the file was also moved
-    pub file: String,
+    /// File the comment is in, before an eventual rename
+    pub old_file: String,
+    /// File the comment is in, after an eventual rename
+    pub new_file: String,
     pub line: LineLocation,
     /// For a spanned comment, the first line of the span. See `line` for docs on semantics
     pub start_line: Option<LineLocation>,
@@ -69,14 +73,18 @@ struct StartState {
 }
 
 struct FilePreambleState {
-    /// Relative path of the file under diff
-    file: String,
+    /// Relative path of the file under diff, before rename
+    old_file: String,
+    /// Relative path of the file under diff, after rename
+    new_file: String,
 }
 
 #[derive(Clone)]
 struct FileDiffState {
-    /// Relative path of the file under diff
-    file: String,
+    /// Relative path of the file under diff, before rename
+    old_file: String,
+    /// Relative path of the file under diff, after rename
+    new_file: String,
     /// Current left line position. See `LineLocation` for docs on semantics of `line`
     left_line: u64,
     /// Current right line position. See `LineLocation` for docs on semantics of `line`
@@ -152,11 +160,12 @@ fn is_prr_directive(s: &str) -> Option<&str> {
 }
 
 /// Parses the new filename out of a diff header
-fn parse_diff_header(line: &str) -> Result<String> {
+fn parse_diff_header(line: &str) -> Result<(String, String)> {
     if let Some(captures) = DIFF_START.captures(line) {
-        let new: &str = captures.name("new").unwrap().as_str();
+        let old = captures.name("old").unwrap().as_str().trim().to_string();
+        let new = captures.name("new").unwrap().as_str().trim().to_string();
 
-        Ok(new.trim().to_owned())
+        Ok((old, new))
     } else {
         Err(anyhow!("Invalid diff header: could not parse"))
     }
@@ -199,11 +208,15 @@ fn is_left_line(line: &str) -> bool {
     line.starts_with('-')
 }
 
+fn is_right_line(line: &str) -> bool {
+    line.starts_with('+')
+}
+
 /// Given the current line and line positions, returns what the next line positions should be
 fn get_next_lines(line: &str, left: u64, right: u64) -> (u64, u64) {
     if is_left_line(line) {
         (left + 1, right)
-    } else if line.starts_with('+') {
+    } else if is_right_line(line) {
         (left, right + 1)
     } else {
         (left + 1, right + 1)
@@ -236,8 +249,10 @@ impl ReviewParser {
                             Some(Comment::Review(state.comment.join("\n").trim().to_string()));
                     }
 
+                    let (old_file, new_file) = parse_diff_header(line)?;
                     self.state = State::FilePreamble(FilePreambleState {
-                        file: parse_diff_header(line)?,
+                        old_file,
+                        new_file,
                     });
 
                     return Ok(review_comment);
@@ -258,8 +273,9 @@ impl ReviewParser {
             State::FilePreamble(state) => {
                 if !is_quoted {
                     bail!(
-                        "Unexpected comment in file preamble state, file: {}",
-                        state.file
+                        "Unexpected comment in file preamble state, file: a/{} b/{}",
+                        state.old_file,
+                        state.new_file,
                     );
                 }
 
@@ -269,13 +285,16 @@ impl ReviewParser {
                     right_start = right_start.saturating_sub(1);
 
                     self.state = State::FileDiff(FileDiffState {
-                        file: state.file.to_owned(),
+                        old_file: state.old_file.to_owned(),
+                        new_file: state.new_file.to_owned(),
                         left_line: left_start,
                         right_line: right_start,
                         line: if is_left_line(line) {
                             LineLocation::Left(left_start)
-                        } else {
+                        } else if is_right_line(line) {
                             LineLocation::Right(right_start)
+                        } else {
+                            LineLocation::Both(left_start, right_start)
                         },
                         span_start_line: None,
                     });
@@ -288,18 +307,25 @@ impl ReviewParser {
                     if is_diff_header(line) {
                         if state.span_start_line.is_some() {
                             bail!(
-                                "Detected span that was not terminated with a comment, file: {}",
-                                state.file
+                                "Detected span that was not terminated with a comment, file: a/{} b/{}",
+                                state.old_file,
+                                state.new_file,
                             );
                         }
 
+                        let (old_file, new_file) = parse_diff_header(line)?;
                         self.state = State::FilePreamble(FilePreambleState {
-                            file: parse_diff_header(line)?,
+                            old_file,
+                            new_file,
                         });
                     } else if let Some((mut left_start, mut right_start)) = parse_hunk_start(line)?
                     {
                         if state.span_start_line.is_some() {
-                            bail!("Detected cross chunk span, file: {}", state.file);
+                            bail!(
+                                "Detected cross chunk span, file: a/{} b/{}",
+                                state.old_file,
+                                state.new_file,
+                            );
                         }
 
                         // Subtract 1 b/c this line is before the actual diff hunk
@@ -310,8 +336,10 @@ impl ReviewParser {
                         state.right_line = right_start;
                         if is_left_line(line) {
                             state.line = LineLocation::Left(left_start);
-                        } else {
+                        } else if is_right_line(line) {
                             state.line = LineLocation::Right(right_start);
+                        } else {
+                            state.line = LineLocation::Both(left_start, right_start);
                         }
                     } else {
                         let (next_left, next_right) =
@@ -320,8 +348,10 @@ impl ReviewParser {
                         state.right_line = next_right;
                         if is_left_line(line) {
                             state.line = LineLocation::Left(next_left);
-                        } else {
+                        } else if is_right_line(line) {
                             state.line = LineLocation::Right(next_right);
+                        } else {
+                            state.line = LineLocation::Both(next_left, next_right);
                         }
                     }
 
@@ -348,8 +378,9 @@ impl ReviewParser {
                 if is_quoted {
                     if state.file_diff_state.span_start_line.is_some() {
                         bail!(
-                            "Detected span that was not terminated with a comment, file: {}",
-                            state.file_diff_state.file
+                            "Detected span that was not terminated with a comment, file: a/{} b/{}",
+                            state.file_diff_state.old_file,
+                            state.file_diff_state.new_file,
                         );
                     }
 
@@ -359,20 +390,20 @@ impl ReviewParser {
                         state.file_diff_state.left_line,
                         state.file_diff_state.right_line,
                     );
+                    let line = if is_left_line(line) {
+                        LineLocation::Left(next_left)
+                    } else if is_right_line(line) {
+                        LineLocation::Right(next_right)
+                    } else {
+                        LineLocation::Both(next_left, next_right)
+                    };
                     self.state = State::FileDiff(FileDiffState {
-                        file: state.file_diff_state.file.to_owned(),
+                        old_file: state.file_diff_state.old_file.to_owned(),
+                        new_file: state.file_diff_state.new_file.to_owned(),
                         left_line: next_left,
                         right_line: next_right,
-                        line: if is_left_line(line) {
-                            LineLocation::Left(next_left)
-                        } else {
-                            LineLocation::Right(next_right)
-                        },
-                        span_start_line: Some(if is_left_line(line) {
-                            LineLocation::Left(next_left)
-                        } else {
-                            LineLocation::Right(next_right)
-                        }),
+                        line: line.clone(),
+                        span_start_line: Some(line),
                     });
 
                     Ok(None)
@@ -392,15 +423,18 @@ impl ReviewParser {
             State::Comment(state) => {
                 if is_quoted {
                     let comment = Comment::Inline(InlineComment {
-                        file: state.file_diff_state.file.clone(),
+                        old_file: state.file_diff_state.old_file.clone(),
+                        new_file: state.file_diff_state.new_file.clone(),
                         line: state.file_diff_state.line.clone(),
                         start_line: state.file_diff_state.span_start_line.clone(),
                         comment: state.comment.join("\n").trim_end().to_string(),
                     });
 
                     if is_diff_header(line) {
+                        let (old_file, new_file) = parse_diff_header(line)?;
                         self.state = State::FilePreamble(FilePreambleState {
-                            file: parse_diff_header(line)?,
+                            old_file,
+                            new_file,
                         });
                     } else {
                         let (next_left, next_right) = get_next_lines(
@@ -409,13 +443,16 @@ impl ReviewParser {
                             state.file_diff_state.right_line,
                         );
                         self.state = State::FileDiff(FileDiffState {
-                            file: state.file_diff_state.file.to_owned(),
+                            old_file: state.file_diff_state.old_file.to_owned(),
+                            new_file: state.file_diff_state.new_file.to_owned(),
                             left_line: next_left,
                             right_line: next_right,
                             line: if is_left_line(line) {
                                 LineLocation::Left(next_left)
-                            } else {
+                            } else if is_right_line(line) {
                                 LineLocation::Right(next_right)
+                            } else {
+                                LineLocation::Both(next_left, next_right)
                             },
                             span_start_line: None,
                         });
@@ -433,7 +470,8 @@ impl ReviewParser {
     pub fn finish(self) -> Option<Comment> {
         match self.state {
             State::Comment(state) => Some(Comment::Inline(InlineComment {
-                file: state.file_diff_state.file,
+                old_file: state.file_diff_state.old_file,
+                new_file: state.file_diff_state.new_file,
                 line: state.file_diff_state.line,
                 start_line: state.file_diff_state.span_start_line,
                 comment: state.comment.join("\n").trim_end().to_string(),
