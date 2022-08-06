@@ -2,17 +2,13 @@ use gitlab::api::Query;
 use lazy_static::lazy_static;
 use regex::Regex;
 
-use std::path::{Path, PathBuf};
-
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use gitlab::api::projects::merge_requests::discussions::{
     CreateMergeRequestDiscussion, Position, TextPosition,
 };
-use reqwest::StatusCode;
-use serde_json::{json, Value};
 
 use crate::api::Api;
-use crate::parser::{LineLocation, ReviewAction};
+use crate::parser::LineLocation;
 use crate::review::{Extra, Review};
 use crate::Config;
 
@@ -76,7 +72,7 @@ impl Api for Gitlab {
 
     fn submit_pr(&self, owner: &str, repo: &str, pr_num: u64, debug: bool) -> Result<()> {
         let review = Review::new_existing(&self.config.workdir()?, owner, repo, pr_num);
-        let (review_action, review_comment, inline_comments) = review.comments()?;
+        let (review_action, review_comment, inline_comments) = review.comments()?; // TODO approve
         let metadata = review.read_metadata()?;
 
         if review_comment.is_empty() && inline_comments.is_empty() {
