@@ -270,6 +270,7 @@ impl Review {
     /// Returns path to user-facing review file
     pub fn path(&self) -> PathBuf {
         let mut p = self.workdir.clone();
+        // TODO host
         p.push(&self.owner);
         p.push(&self.repo);
         p.push(format!("{}.prr", self.pr_num));
