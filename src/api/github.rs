@@ -86,8 +86,8 @@ impl Api for Github {
                     .iter()
                     .map(|c| {
                         let (line, side) = match c.line {
-                            LineLocation::Left(line) => (line, "LEFT"),
-                            LineLocation::Right(line) | LineLocation::Both(_, line) => (line, "RIGHT"),
+                            LineLocation::Left(line, _) => (line, "LEFT"),
+                            LineLocation::Right(_, line) | LineLocation::Both(_, line) => (line, "RIGHT"),
                         };
 
                         let mut json_comment = json!({
@@ -98,8 +98,8 @@ impl Api for Github {
                         });
                         if let Some(start_line) = &c.start_line {
                             let (line, side) = match start_line {
-                                LineLocation::Left(line) => (line, "LEFT"),
-                                LineLocation::Right(line) | LineLocation::Both(_, line) => (line, "RIGHT"),
+                                LineLocation::Left(line, _) => (line, "LEFT"),
+                                LineLocation::Right(_, line) | LineLocation::Both(_, line) => (line, "RIGHT"),
                             };
 
                             json_comment["start_line"] = (*line).into();

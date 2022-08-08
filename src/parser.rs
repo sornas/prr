@@ -21,16 +21,16 @@ lazy_static! {
 /// The distinction between Left and Right is important when commenting on
 /// deleted or added lines. A useful way to think about the line location is
 /// the line number a comment should be attached to in the file pre-change (left)
-/// or the file post-change (right)
+/// or the file post-change (right).
+///
+/// The two numbers are the line location before and after the applied diff.
 #[derive(Debug, PartialEq, Clone)]
 pub enum LineLocation {
     /// The "red"/deleted side of the diff
-    Left(u64),
+    Left(u64, u64),
     /// The "green"/added side of the diff
-    Right(u64),
-    /// The "white"/existing side of the diff as `(line_in_old, line_in_new)`.
-    ///
-    /// Gitlab requires both for comments on unchanged lnes.
+    Right(u64, u64),
+    /// The "white"/existing side of the diff
     Both(u64, u64),
 }
 
@@ -290,9 +290,9 @@ impl ReviewParser {
                         left_line: left_start,
                         right_line: right_start,
                         line: if is_left_line(line) {
-                            LineLocation::Left(left_start)
+                            LineLocation::Left(left_start, right_start)
                         } else if is_right_line(line) {
-                            LineLocation::Right(right_start)
+                            LineLocation::Right(left_start, right_start)
                         } else {
                             LineLocation::Both(left_start, right_start)
                         },
@@ -335,9 +335,9 @@ impl ReviewParser {
                         state.left_line = left_start;
                         state.right_line = right_start;
                         if is_left_line(line) {
-                            state.line = LineLocation::Left(left_start);
+                            state.line = LineLocation::Left(left_start, right_start);
                         } else if is_right_line(line) {
-                            state.line = LineLocation::Right(right_start);
+                            state.line = LineLocation::Right(left_start, right_start);
                         } else {
                             state.line = LineLocation::Both(left_start, right_start);
                         }
@@ -347,9 +347,9 @@ impl ReviewParser {
                         state.left_line = next_left;
                         state.right_line = next_right;
                         if is_left_line(line) {
-                            state.line = LineLocation::Left(next_left);
+                            state.line = LineLocation::Left(next_left, next_right);
                         } else if is_right_line(line) {
-                            state.line = LineLocation::Right(next_right);
+                            state.line = LineLocation::Right(next_left, next_right);
                         } else {
                             state.line = LineLocation::Both(next_left, next_right);
                         }
@@ -391,9 +391,9 @@ impl ReviewParser {
                         state.file_diff_state.right_line,
                     );
                     let line = if is_left_line(line) {
-                        LineLocation::Left(next_left)
+                        LineLocation::Left(next_left, next_right)
                     } else if is_right_line(line) {
-                        LineLocation::Right(next_right)
+                        LineLocation::Right(next_left, next_right)
                     } else {
                         LineLocation::Both(next_left, next_right)
                     };
@@ -448,9 +448,9 @@ impl ReviewParser {
                             left_line: next_left,
                             right_line: next_right,
                             line: if is_left_line(line) {
-                                LineLocation::Left(next_left)
+                                LineLocation::Left(next_left, next_right)
                             } else if is_right_line(line) {
-                                LineLocation::Right(next_right)
+                                LineLocation::Right(next_left, next_right)
                             } else {
                                 LineLocation::Both(next_left, next_right)
                             },
