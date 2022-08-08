@@ -101,7 +101,7 @@ impl Api for Gitlab {
             .head_sha(head_sha)
             .start_sha(start_sha);
         Review::new(
-            &self.config.workdir()?,
+            &self.config.workdir(self.config.host_or(GITLAB_BASE_URL))?,
             diff,
             owner,
             repo,
@@ -112,7 +112,7 @@ impl Api for Gitlab {
     }
 
     fn submit_pr(&self, owner: &str, repo: &str, pr_num: u64, debug: bool) -> Result<()> {
-        let review = Review::new_existing(&self.config.workdir()?, owner, repo, pr_num);
+        let review = Review::new_existing(&self.config.workdir(self.config.host_or(GITLAB_BASE_URL))?, owner, repo, pr_num);
         let (review_action, review_comment, inline_comments) = review.comments()?; // TODO approve
         let metadata = review.read_metadata()?;
         let base_sha = metadata

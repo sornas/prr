@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -70,7 +70,7 @@ pub struct Config {
 }
 
 impl Config {
-    fn workdir(&self) -> Result<PathBuf> {
+    fn workdir(&self, host: impl AsRef<Path>) -> Result<PathBuf> {
         match &self.prr.workdir {
             Some(d) => {
                 if d.starts_with('~') {
@@ -84,6 +84,11 @@ impl Config {
                 Ok(xdg_dirs.get_data_home())
             }
         }
+        .map(|p| p.join(host))
+    }
+
+    fn host_or<'s>(&'s self, default: &'s str) -> &'s str {
+        self.prr.url.as_deref().unwrap_or(default)
     }
 }
 

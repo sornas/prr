@@ -62,13 +62,13 @@ impl Api for Github {
                 .await
                 .context("Failed to fetch diff")?;
 
-            Review::new(&self.config.workdir()?, diff, owner, repo, pr_num, Extra::default(), force)
+            Review::new(&self.config.workdir(self.config.host_or(GITHUB_BASE_URL))?, diff, owner, repo, pr_num, Extra::default(), force)
         })
     }
 
     fn submit_pr(&self, owner: &str, repo: &str, pr_num: u64, debug: bool) -> Result<()> {
         tokio::runtime::Runtime::new()?.block_on(async {
-            let review = Review::new_existing(&self.config.workdir()?, owner, repo, pr_num);
+            let review = Review::new_existing(&self.config.workdir(self.config.host_or(GITHUB_BASE_URL))?, owner, repo, pr_num);
             let (review_action, review_comment, inline_comments) = review.comments()?;
 
             if review_comment.is_empty() && inline_comments.is_empty() {
