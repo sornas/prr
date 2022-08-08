@@ -7,9 +7,11 @@ use anyhow::{anyhow, bail, Result};
 use gitlab::api::projects::merge_requests::discussions::{
     CreateMergeRequestDiscussion, Position, TextPosition,
 };
+use gitlab::api::projects::merge_requests::notes::CreateMergeRequestNote;
+use gitlab::api::projects::merge_requests::ApproveMergeRequest;
 
 use crate::api::Api;
-use crate::parser::LineLocation;
+use crate::parser::{LineLocation, ReviewAction};
 use crate::review::{Extra, Review};
 use crate::Config;
 
@@ -112,9 +114,16 @@ impl Api for Gitlab {
     }
 
     fn submit_pr(&self, owner: &str, repo: &str, pr_num: u64, debug: bool) -> Result<()> {
-        let review = Review::new_existing(&self.config.workdir(self.config.host_or(GITLAB_BASE_URL))?, owner, repo, pr_num);
-        let (review_action, review_comment, inline_comments) = review.comments()?; // TODO approve
+        let review = Review::new_existing(
+            &self.config.workdir(self.config.host_or(GITLAB_BASE_URL))?,
+            owner,
+            repo,
+            pr_num,
+        );
+        let (review_action, review_comment, inline_comments) = review.comments()?;
         let metadata = review.read_metadata()?;
+        let project = format!("{}/{}", owner, repo);
+
         let base_sha = metadata
             .base_sha
             .as_ref()
@@ -130,6 +139,11 @@ impl Api for Gitlab {
 
         if review_comment.is_empty() && inline_comments.is_empty() {
             bail!("No review comments");
+        }
+
+        if review_action == ReviewAction::RequestChanges {
+            // TODO: Maybe this doesn't warrant a bail.
+            bail!("GitLab doesn't support requesting changes");
         }
 
         // Make each comment a CreateMergeRequestDiscussion
@@ -239,7 +253,7 @@ impl Api for Gitlab {
                 position.text_position(text_position.build()?);
 
                 CreateMergeRequestDiscussion::builder()
-                    .project(format!("{}/{}", owner, repo))
+                    .project(project.as_str())
                     .merge_request(pr_num)
                     .body(&c.comment)
                     .position(position.build()?)
@@ -250,6 +264,23 @@ impl Api for Gitlab {
 
         for discussion in discussions {
             gitlab::api::ignore(discussion).query(&self.client)?;
+        }
+
+        if !review_comment.is_empty() {
+            let note = CreateMergeRequestNote::builder()
+                .project(project.as_str())
+                .merge_request(pr_num)
+                .body(review_comment)
+                .build()?;
+            gitlab::api::ignore(note).query(&self.client)?;
+        }
+
+        if review_action == ReviewAction::Approve {
+            let approve = ApproveMergeRequest::builder()
+                .project(project.as_str())
+                .merge_request(pr_num)
+                .build()?;
+            gitlab::api::ignore(approve).query(&self.client)?;
         }
 
         Ok(())
