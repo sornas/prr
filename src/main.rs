@@ -4,26 +4,21 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use lazy_static::lazy_static;
 use regex::{Captures, Regex};
+use serde::Deserialize;
 
+mod api;
 mod parser;
-mod prr;
 mod review;
 
-use prr::Prr;
+use api::Host;
 
 // Use lazy static to ensure regex is only compiled once
 lazy_static! {
     // Regex for short input. Example:
     //
-    //      danobi/prr-test-repo/6
+    //      [<host>:]danobi/prr-test-repo/6
     //
-    static ref SHORT: Regex = Regex::new(r"^(?P<org>[\w\-_]+)/(?P<repo>[\w\-_]+)/(?P<pr_num>\d+)").unwrap();
-
-    // Regex for url input. Url looks something like:
-    //
-    //      https://github.com/danobi/prr-test-repo/pull/6
-    //
-    static ref URL: Regex = Regex::new(r".*github\.com/(?P<org>.+)/(?P<repo>.+)/pull/(?P<pr_num>\d+)").unwrap();
+    static ref SHORT: Regex = Regex::new(r"^((?P<host>\w+):)?(?P<org>[\w\-_]+)/(?P<repo>[\w\-_]+)/(?P<pr_num>\d+)").unwrap();
 }
 
 #[derive(Subcommand, Debug)]
@@ -55,10 +50,40 @@ struct Args {
     command: Command,
 }
 
-/// Parses a PR string in the form of `danobi/prr/24` and returns
-/// a tuple ("danobi", "prr", 24) or an error if string is malformed
-fn parse_pr_str<'a>(s: &'a str) -> Result<(String, String, u64)> {
-    let f = |captures: Captures<'a>| -> Result<(String, String, u64)> {
+#[derive(Debug, Deserialize)]
+struct PrrConfig {
+    /// API token for the given service
+    token: String,
+    /// Directory to place review files
+    workdir: Option<String>,
+    /// Instance URL
+    ///
+    /// Useful for hosted instances with custom URLs
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    prr: PrrConfig,
+}
+
+
+/// Parses a PR string and returns a tuple (Host::Github, "danobi", "prr", 24) or an error if
+/// string is malformed
+///
+/// Allowed formats:
+/// - `danobi/prr/24` (defaults to github)
+/// - `gitlab:danobi/prr/24`
+fn parse_pr_str<'a>(s: &'a str) -> Result<(Host, String, String, u64)> {
+    let f = |host_override: Option<Host>, captures: Captures<'a>|
+        -> Result<(Host, String, String, u64)>
+    {
+        let host = host_override.unwrap_or_else(
+            || captures
+                .name("host")
+                .and_then(|capture| Host::from_str(capture.as_str()))
+                .unwrap_or(Host::Github)
+        );
         let owner = captures.name("org").unwrap().as_str().to_owned();
         let repo = captures.name("repo").unwrap().as_str().to_owned();
         let pr_nr: u64 = captures
@@ -68,13 +93,15 @@ fn parse_pr_str<'a>(s: &'a str) -> Result<(String, String, u64)> {
             .parse()
             .context("Failed to parse pr number")?;
 
-        Ok((owner, repo, pr_nr))
+        Ok((host, owner, repo, pr_nr))
     };
 
     if let Some(captures) = SHORT.captures(s) {
-        f(captures)
-    } else if let Some(captures) = URL.captures(s) {
-        f(captures)
+        f(None, captures)
+    } else if let Some(captures) = api::github::URL.captures(s) {
+        f(Some(Host::Github), captures)
+    } else if let Some(captures) = api::gitlab::URL.captures(s) {
+        f(Some(Host::Gitlab), captures)
     } else {
         bail!("Invalid PR ref format")
     }
@@ -93,17 +120,20 @@ async fn main() -> Result<()> {
         }
     };
 
-    let prr = Prr::new(&config_path)?;
+    let config_contents = std::fs::read_to_string(config_path).context("Failed to read config")?;
+    let config: Config = toml::from_str(&config_contents).context("Failed to parse toml")?;
 
     match args.command {
         Command::Get { pr, force } => {
-            let (owner, repo, pr_num) = parse_pr_str(&pr)?;
-            let review = prr.get_pr(&owner, &repo, pr_num, force).await?;
+            let (host, owner, repo, pr_num) = parse_pr_str(&pr)?;
+            let api = host.init(config)?;
+            let review = api.get_pr(&owner, &repo, pr_num, force).await?;
             println!("{}", review.path().display());
         }
         Command::Submit { pr, debug } => {
-            let (owner, repo, pr_num) = parse_pr_str(&pr)?;
-            prr.submit_pr(&owner, &repo, pr_num, debug).await?;
+            let (host, owner, repo, pr_num) = parse_pr_str(&pr)?;
+            let api = host.init(config)?;
+            api.submit_pr(&owner, &repo, pr_num, debug).await?;
         }
     }
 

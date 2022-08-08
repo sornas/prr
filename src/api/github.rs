@@ -1,46 +1,40 @@
-use std::fs;
+use async_trait::async_trait;
+use lazy_static::lazy_static;
+use regex::Regex;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use octocrab::Octocrab;
 use reqwest::StatusCode;
-use serde_derive::Deserialize;
 use serde_json::{json, Value};
 
+use crate::Config;
+use crate::api::Api;
 use crate::parser::{LineLocation, ReviewAction};
 use crate::review::Review;
 
+// Use lazy static to ensure regex is only compiled once
+lazy_static! {
+    // Regex for url input. Url looks something like:
+    //
+    //      https://github.com/danobi/prr-test-repo/pull/6
+    //
+    pub static ref URL: Regex = Regex::new(r".*github\.com/(?P<org>.+)/(?P<repo>.+)/pull/(?P<pr_num>\d+)").unwrap();
+}
+
 const GITHUB_BASE_URL: &str = "https://api.github.com";
 
-#[derive(Debug, Deserialize)]
-struct PrrConfig {
-    /// GH personal token
-    token: String,
-    /// Directory to place review files
-    workdir: Option<String>,
-    /// Github URL
-    ///
-    /// Useful for enterprise instances with custom URLs
-    url: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Config {
-    prr: PrrConfig,
-}
-
 /// Main struct that coordinates all business logic and talks to GH
-pub struct Prr {
+pub struct Github {
     /// User config
     config: Config,
     /// Instantiated github client
     crab: Octocrab,
 }
 
-impl Prr {
-    pub fn new(config_path: &Path) -> Result<Prr> {
-        let config_contents = fs::read_to_string(config_path).context("Failed to read config")?;
-        let config: Config = toml::from_str(&config_contents).context("Failed to parse toml")?;
+impl Github {
+    pub fn new(config: Config) -> Result<Self> {
         let octocrab = Octocrab::builder()
             .personal_token(config.prr.token.clone())
             .base_url(config.prr.url.as_deref().unwrap_or(GITHUB_BASE_URL))
@@ -48,7 +42,7 @@ impl Prr {
             .build()
             .context("Failed to create GH client")?;
 
-        Ok(Prr {
+        Ok(Self {
             config,
             crab: octocrab,
         })
@@ -69,8 +63,11 @@ impl Prr {
             }
         }
     }
+}
 
-    pub async fn get_pr(
+#[async_trait]
+impl Api for Github {
+    async fn get_pr(
         &self,
         owner: &str,
         repo: &str,
@@ -87,7 +84,7 @@ impl Prr {
         Review::new(&self.workdir()?, diff, owner, repo, pr_num, force)
     }
 
-    pub async fn submit_pr(&self, owner: &str, repo: &str, pr_num: u64, debug: bool) -> Result<()> {
+    async fn submit_pr(&self, owner: &str, repo: &str, pr_num: u64, debug: bool) -> Result<()> {
         let review = Review::new_existing(&self.workdir()?, owner, repo, pr_num);
         let (review_action, review_comment, inline_comments) = review.comments()?;
 
